@@ -6,7 +6,7 @@
 
 ## Descripción
 
-Entrenamiento de un modelo federado con datos de Banco 1 (BO VIP, Bolivia) y Banco 2 (BR Privado, Brasil) para detectar fraude en Banco 3 (GT Estatal, Guatemala), que **no posee etiquetas**. Se implementan y comparan dos estrategias: un dataset unificado (baseline federado) y FedAvg simulado (modelos locales independientes cuyas predicciones se promedian).
+Entrenamiento de un modelo federado con datos de Banco 1 (BO VIP, Bolivia) y Banco 2 (BR Privado, Brasil) para detectar fraude en Banco 3 (GT Estatal, Guatemala), que **no posee etiquetas**. Se implementan y comparan dos estrategias: un dataset unificado (baseline federado) y FedAvg simulado (modelos locales independientes cuyas predicciones se promedian). Sobre Banco 3 se generan **tres inferencias federadas** (V1/V2/V3) que exploran cómo combinar los bancos y cómo recalibrar el umbral ante la ausencia de etiquetas.
 
 La restricción central del trabajo es que el modelo debe ser **agnóstico al banco y al país**: no puede usar `bank_code`, `bank_country`, moneda local ni identificadores institucionales, de modo que generalice a cualquier banco nuevo sin reentrenamiento.
 
@@ -144,42 +144,52 @@ Features del FedAvg: intersección de features entre ambos modelos locales → *
 | Modelo                          | AUC-ROC | Recall | Precision | F1     | FP Ratio | FP     | TP    | % Monto Salvado | Threshold |
 | ------------------------------- | ------- | ------ | --------- | ------ | -------- | ------ | ----- | --------------- | --------- |
 | Modelo A — Unificado            | 0.8719  | 90.56% | 5.70%     | 0.1073 | 0.9430   | 18,714 | 1,132 | 95.83%          | 0.2209    |
-| **Modelo B — FedAvg Simulado** | **0.8855** | **90.00%** | **6.06%** | **0.1135** | **0.9394** | **—** | **—** | **96.57%** | **0.0753** |
+| **Modelo B — FedAvg Simulado** | **0.8856** | **90.00%** | **6.09%** | **0.1141** | **0.9391** | **17,345** | **1,125** | **96.58%** | **0.0754** |
 
 **Modelo seleccionado: Modelo B — FedAvg Simulado**
 
-El Modelo B supera al Modelo A en AUC (+0.014), FP Ratio (−0.004) y % Monto Salvado (+0.74%). Dado que las diferencias son favorables y el Modelo B preserva la privacidad de los datos por diseño (principio central del Federated Learning), se selecciona como modelo de producción.
+El Modelo B supera al Modelo A en AUC (+0.0137), FP Ratio (−0.0039) y % Monto Salvado (+0.75%). Dado que las diferencias son favorables y el Modelo B preserva la privacidad de los datos por diseño (principio central del Federated Learning), se selecciona como modelo de producción.
 
 ---
 
-## Inferencia sobre GT Estatal
+## Inferencia sobre GT Estatal — Tres variantes federadas
 
-Se aplica el modelo seleccionado sobre las 100,000 transacciones de GT Estatal. Al no existir etiquetas, no es posible calcular métricas reales.
+Sobre las 100,000 transacciones de GT Estatal se generan **tres inferencias**, todas con el **modelo federado (FedAvg)**: cada banco entrena de forma local y solo se promedian las probabilidades (los datos crudos nunca se comparten). Al no existir etiquetas, no es posible calcular métricas reales; las variantes exploran, en progresión, cómo combinar los bancos y cómo calibrar el umbral.
 
-| Entregable                         | Filas   | Fraude predicho | Tasa predicha |
-| ---------------------------------- | ------- | --------------- | ------------- |
-| Preliminar (30%)                   | 30,000  | 18,027          | 60.09%        |
-| Final (100%)                       | 100,000 | 60,482          | 60.48%        |
+| Variante                              | Combinación de bancos                  | Threshold            | Tasa fraude 30% | Tasa fraude 100% |
+| ------------------------------------- | --------------------------------------- | -------------------- | --------------- | ---------------- |
+| **V1 — FedAvg base**                  | Promedio 50/50                          | 0.0754 (operativo)   | 42.81%          | 43.22%           |
+| **V2 — FedAvg recalibrado**           | Promedio 50/50                          | 0.1171 (calibrado ~5%) | 4.89%         | 5.00%            |
+| **V3 — FedAvg ponderado por AUC**     | Ponderado por AUC (0.557 / 0.443)       | 0.1092 (calibrado ~5%) | 4.88%         | 5.00%            |
+
+- **V1** usa el umbral operativo calibrado a recall 90% en junio. Predice una tasa de fraude elevada (~43%), evidenciando el **distribution shift**: los montos de GT son ~10× menores que los de entrenamiento, lo que infla `amount_zscore_customer` y dispara la señal de fraude. Sirve como baseline.
+- **V2** corrige el shift recalibrando el umbral por cuantil para marcar solo el 5% de transacciones con mayor score (prevalencia asumida similar a la regional de Bolivia/Brasil).
+- **V3** mantiene esa calibración pero, en lugar de promediar 50/50, pondera cada banco por su AUC individual en junio (Bolivia ≈ 0.876 → peso 0.557; Brasil ≈ 0.697 → peso 0.443), dando más peso al modelo que generaliza mejor.
+
+V2 y V3 coinciden en el 99.64% de las predicciones del 30%; V1 vs V2 coinciden solo en 62.07% (efecto de la recalibración). Las entregas se exportan con las columnas `transaction_id` + `is_fraud` ("Verdadero"/"Falso"), respetando el orden original del archivo de Banco 3; el 30% son las primeras 30,000 transacciones de ese archivo.
 
 **Archivos generados:**
 
-| Archivo                              | Descripción                                      |
-| ------------------------------------ | ------------------------------------------------ |
-| `model_A_unificado.lgb`            | Modelo A serializado (LightGBM booster)          |
-| `model_BO_fedavg.lgb`              | Modelo local de Bolivia (FedAvg)                 |
-| `model_BR_fedavg.lgb`              | Modelo local de Brasil (FedAvg)                  |
-| `inferencia_30pct_gt_estatal.xlsx` | Predicciones primer 30% — columna `is_fraud`   |
-| `inferencia_100pct_gt_estatal.xlsx`| Predicciones 100% — columna `is_fraud`         |
+| Archivo                                          | Descripción                                          |
+| ------------------------------------------------ | ---------------------------------------------------- |
+| `model_A_unificado.lgb`                          | Modelo A serializado (LightGBM booster)              |
+| `model_BO_fedavg.lgb`                            | Modelo local de Bolivia (FedAvg)                     |
+| `model_BR_fedavg.lgb`                            | Modelo local de Brasil (FedAvg)                      |
+| `inferencia_{30,100}pct_v1_fedavg_base.xlsx`     | V1 — promedio 50/50, umbral operativo                |
+| `inferencia_{30,100}pct_v2_fedavg_recalibrado.xlsx` | V2 — promedio 50/50, umbral recalibrado ~5%       |
+| `inferencia_{30,100}pct_v3_fedavg_ponderado.xlsx`| V3 — ponderado por AUC, umbral recalibrado ~5%       |
 
 ---
 
 ## Nota sobre el Distribution Shift
 
-GT Estatal presenta montos ~10× menores que los bancos de entrenamiento (mediana USD 13.70 vs ~USD 60–85). Esto genera una tasa de fraude predicha (~60%) significativamente superior a la esperada (~4–5%). El fenómeno se mitiga parcialmente mediante features relativas (`amount_zscore_customer`, `amount_ratio_vs_baseline`, `intl_high_zscore`), pero el threshold no fue recalibrado específicamente para GT Estatal. En un escenario de producción real, se recomienda:
+GT Estatal presenta montos ~10× menores que los bancos de entrenamiento (mediana USD 13.70 vs ~USD 60–85). Con el umbral operativo sin recalibrar (V1), esto genera una tasa de fraude predicha (~43%) muy superior a la esperada (~4–5%). El fenómeno se mitiga mediante features relativas (`amount_zscore_customer`, `amount_ratio_vs_baseline`, `intl_high_zscore`) y, sobre todo, mediante la **recalibración del umbral por cuantil** aplicada en V2 y V3, que lleva la tasa predicha a ~5%, consistente con la prevalencia regional de Bolivia/Brasil. Como trabajo futuro se recomienda:
 
-1. Recalibrar el threshold usando una muestra etiquetada de GT Estatal.
-2. Ponderar el FedAvg por AUC individual de cada banco en lugar de 50/50 fijo.
-3. Explorar fine-tuning del modelo federado con las primeras etiquetas disponibles de Guatemala.
+1. Recalibrar el threshold con la **retroalimentación real del primer 30%** de GT Estatal remitida por PLUS TI (en lugar de asumir prevalencia ~5%).
+2. La ponderación del FedAvg por AUC individual (V3) ya sustituye al 50/50 fijo; afinarla con las primeras etiquetas disponibles.
+3. Explorar fine-tuning / adaptación de dominio sobre las variables de monto antes de la inferencia final.
+
+> La selección final entre V2 y V3 se apoyará en las métricas del primer 30% devueltas por PLUS TI.
 
 ---
 
@@ -189,9 +199,9 @@ GT Estatal presenta montos ~10× menores que los bancos de entrenamiento (median
 | ----------------------- | -------------------- | ----------------- |
 | Datos compartidos       | Sí (datos crudos)    | No (solo predicciones) |
 | Privacidad              | Menor                | **Mayor** ✓       |
-| AUC en test             | 0.8719               | **0.8855** ✓      |
-| FP Ratio en test        | 0.9430               | **0.9394** ✓      |
-| % Monto salvado         | 95.83%               | **96.57%** ✓      |
+| AUC en test             | 0.8719               | **0.8856** ✓      |
+| FP Ratio en test        | 0.9430               | **0.9391** ✓      |
+| % Monto salvado         | 95.83%               | **96.58%** ✓      |
 | Complejidad operativa   | Baja                 | Moderada          |
 
 El Modelo B (FedAvg Simulado) es técnicamente superior en todas las métricas clave y, además, respeta el principio fundamental del Federated Learning: **los datos nunca abandonan el servidor del banco**. Se selecciona como modelo de producción para la inferencia sobre GT Estatal.
